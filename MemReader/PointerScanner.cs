@@ -11,8 +11,16 @@ internal sealed record PointerChain(string Module, ulong ModuleOffset, int[] Off
 {
     public int Depth => Offsets.Length;
 
+    /// <summary>
+    /// A code signature for the instruction that loads the module-level holder, when
+    /// one has been captured. Lets <see cref="PointerScanner.Resolve"/> re-find the
+    /// holder after a patch shifts <see cref="ModuleOffset"/> instead of trusting it.
+    /// </summary>
+    public ChainFingerprint? Fingerprint { get; init; }
+
     public override string ToString() =>
-        $"{Module}+0x{ModuleOffset:X}" + string.Concat(Offsets.Select(o => $" -> +0x{o:X}"));
+        $"{Module}+0x{ModuleOffset:X}" + string.Concat(Offsets.Select(o => $" -> +0x{o:X}")) +
+        (Fingerprint is null ? "" : " (self-healing)");
 }
 
 /// <summary>
@@ -140,16 +148,36 @@ internal sealed class PointerScanner
     }
 
     /// <summary>Resolves a chain against the process as it is right now.</summary>
-    public IntPtr? Resolve(PointerChain chain)
-    {
-        var module = _modules.FirstOrDefault(m =>
-            string.Equals(m.Name, chain.Module, StringComparison.OrdinalIgnoreCase));
-        if (module.Base == 0) return null;
+    public IntPtr? Resolve(PointerChain chain) => ResolveDirect(_mem, _modules, chain);
 
-        ulong addr = module.Base + chain.ModuleOffset;
+    /// <summary>
+    /// Resolves a chain without a prebuilt index - just this one walk. Used by a
+    /// generated trainer, which needs to re-find a single address on attach and
+    /// has no reason to pay for a full-process pointer scan to do it.
+    /// </summary>
+    public static IntPtr? ResolveDirect(ProcessMemory mem, PointerChain chain) =>
+        ResolveDirect(mem, mem.Modules(), chain);
+
+    private static IntPtr? ResolveDirect(
+        ProcessMemory mem, List<(string Name, ulong Base, ulong Size)> modules, PointerChain chain)
+    {
+        // A fingerprint re-finds the holder by its code, not by an offset that assumed
+        // the old binary - prefer it, since a stale offset can still read *something*
+        // without failing outright. Fall back to the plain offset if there's no
+        // fingerprint yet, or the module hasn't actually been patched since it was made.
+        ulong? addr = chain.Fingerprint?.Locate(mem, chain.Module);
+
+        if (addr is null)
+        {
+            var module = modules.FirstOrDefault(m =>
+                string.Equals(m.Name, chain.Module, StringComparison.OrdinalIgnoreCase));
+            if (module.Base == 0) return null;
+            addr = module.Base + chain.ModuleOffset;
+        }
+
         foreach (int offset in chain.Offsets)
         {
-            var buf = _mem.Read((IntPtr)(long)addr, 8);
+            var buf = mem.Read((IntPtr)(long)addr.Value, 8);
             if (buf is null) return null;
 
             long next = BitConverter.ToInt64(buf, 0) + offset;
@@ -157,7 +185,7 @@ internal sealed class PointerScanner
             addr = (ulong)next;
         }
 
-        return (IntPtr)(long)addr;
+        return (IntPtr)(long)addr.Value;
     }
 
     /// <summary>Shortest chains with the smallest offsets are the most reliable across runs.</summary>
@@ -209,12 +237,24 @@ internal sealed class PointerScanner
         return false;
     }
 
-    /// <summary>Chains are worth keeping between sessions, so they serialise to one line each.</summary>
+    /// <summary>
+    /// Chains are worth keeping between sessions, so they serialise to one line each.
+    /// A chain with a captured fingerprint gets three extra fields; older files and
+    /// chains without one just stop after the offsets, and load back with none.
+    /// </summary>
     public static string Save(IEnumerable<PointerChain> chains)
     {
         var sb = new StringBuilder();
         foreach (var c in chains)
-            sb.AppendLine($"{c.Module}|{c.ModuleOffset:X}|{string.Join(",", c.Offsets.Select(o => o.ToString("X")))}");
+        {
+            sb.Append($"{c.Module}|{c.ModuleOffset:X}|{string.Join(",", c.Offsets.Select(o => o.ToString("X")))}");
+            if (c.Fingerprint is { } fp)
+            {
+                string wildcard = new(fp.Wildcard.Select(w => w ? '1' : '0').ToArray());
+                sb.Append($"|{Convert.ToHexString(fp.Pattern)}|{wildcard}|{fp.InstructionOffset}");
+            }
+            sb.AppendLine();
+        }
         return sb.ToString();
     }
 
@@ -224,13 +264,20 @@ internal sealed class PointerScanner
         foreach (var line in text.Split('\n', StringSplitOptions.RemoveEmptyEntries))
         {
             var parts = line.Trim().Split('|');
-            if (parts.Length != 3) continue;
+            if (parts.Length != 3 && parts.Length != 6) continue;
 
             var offsets = parts[2].Length == 0
                 ? Array.Empty<int>()
                 : parts[2].Split(',').Select(o => Convert.ToInt32(o, 16)).ToArray();
 
-            chains.Add(new PointerChain(parts[0], Convert.ToUInt64(parts[1], 16), offsets));
+            ChainFingerprint? fingerprint = parts.Length == 6
+                ? new ChainFingerprint(
+                    Convert.FromHexString(parts[3]),
+                    parts[4].Select(c => c == '1').ToArray(),
+                    int.Parse(parts[5]))
+                : null;
+
+            chains.Add(new PointerChain(parts[0], Convert.ToUInt64(parts[1], 16), offsets) { Fingerprint = fingerprint });
         }
         return chains;
     }

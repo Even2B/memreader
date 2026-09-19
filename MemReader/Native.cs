@@ -13,6 +13,9 @@ internal static class Native
     public const uint MEM_COMMIT = 0x1000;
     public const uint PAGE_GUARD = 0x100;
     public const uint PAGE_NOACCESS = 0x01;
+    public const uint PAGE_EXECUTE = 0x10;
+    public const uint PAGE_EXECUTE_READ = 0x20;
+    public const uint PAGE_EXECUTE_WRITECOPY = 0x80;
 
     [StructLayout(LayoutKind.Sequential)]
     public struct MEMORY_BASIC_INFORMATION

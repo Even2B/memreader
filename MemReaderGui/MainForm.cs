@@ -56,6 +56,7 @@ internal sealed class MainForm : Form
     private readonly Button _addWatch = new();
     private readonly Button _writeAll = new();
     private readonly Button _dropWatch = new();
+    private readonly Button _buildTrainer = new();
     private readonly System.Windows.Forms.Timer _freeze = new();
 
     // --- change log: what writes to a watched address, and when ---
@@ -576,6 +577,12 @@ internal sealed class MainForm : Form
         StyleButton(_dropWatch, primary: false);
         watchBtns.Controls.Add(_dropWatch);
 
+        _buildTrainer.Text = "Build trainer...";
+        _buildTrainer.Width = 130;
+        _buildTrainer.Margin = new Padding(12, 0, 8, 0);
+        StyleButton(_buildTrainer, primary: true);
+        watchBtns.Controls.Add(_buildTrainer);
+
         _logging.Text = "Log changes";
         _logging.Checked = true;
         _logging.ForeColor = Theme.Text;
@@ -866,7 +873,7 @@ internal sealed class MainForm : Form
         _corrGrid.CellValueNeeded += OnCorrGridValueNeeded;
 
         _findPtr.Click += async (_, _) => await FindPointerChains();
-        _resolvePtr.Click += (_, _) => ResolveChainsToWatch();
+        _resolvePtr.Click += async (_, _) => await ResolveChainsToWatch();
         _savePtr.Click += (_, _) => SaveChains();
         _loadPtr.Click += (_, _) => LoadChains();
         _unknownScan.Click += async (_, _) => await TakeSnapshot();
@@ -876,6 +883,7 @@ internal sealed class MainForm : Form
         _addWatch.Click += (_, _) => AddSelectedToWatch();
         _writeAll.Click += (_, _) => WriteValueToAllResults();
         _dropWatch.Click += (_, _) => RemoveSelectedWatch();
+        _buildTrainer.Click += async (_, _) => await BuildTrainer();
         _grid.CellDoubleClick += (_, _) => AddSelectedToWatch();
 
         _watchGrid.CellValueNeeded += OnWatchValueNeeded;
@@ -1619,8 +1627,12 @@ internal sealed class MainForm : Form
     /// <summary>
     /// Resolves chains against the process as it is now and watches whatever they land
     /// on. After a restart this is what turns a saved chain back into a live address.
+    /// Each chain also gets a self-healing signature captured here if it doesn't have
+    /// one yet, so it can keep resolving after a patch moves its module offset too -
+    /// this is the one place a chain is known to be worth keeping, so it's the one
+    /// place worth paying to fingerprint it.
     /// </summary>
-    private void ResolveChainsToWatch()
+    private async Task ResolveChainsToWatch()
     {
         if (_target is null || _chains.Count == 0)
         {
@@ -1629,28 +1641,56 @@ internal sealed class MainForm : Form
         }
 
         _ptrScan ??= new PointerScanner(_target);
-
+        var mem = _target;
+        var scan = _ptrScan;
+        var modules = mem.Modules();
         var known = _watch.Select(w => w.Address).ToHashSet();
-        int added = 0, broken = 0;
+        var candidates = _chains.Take(50).ToList();
 
-        foreach (var chain in _chains.Take(50))
+        _resolvePtr.Enabled = false;
+        SetStatus("Resolving chains and capturing self-healing signatures...", Theme.Accent);
+
+        var resolved = new List<(IntPtr Address, PointerChain Chain)>();
+        int broken = 0;
+
+        await Task.Run(() =>
         {
-            var addr = _ptrScan.Resolve(chain);
-            if (addr is null) { broken++; continue; }
-            if (!known.Add(addr.Value)) continue;
+            foreach (var chain in candidates)
+            {
+                var addr = scan.Resolve(chain);
+                if (addr is null) { broken++; continue; }
+                if (!known.Add(addr.Value)) continue;
 
-            _watch.Add(new WatchEntry { Address = addr.Value, Kind = _lastKind, Size = _lastSize });
-            added++;
-        }
+                resolved.Add((addr.Value, chain.Fingerprint is not null ? chain : WithFingerprint(mem, modules, chain)));
+            }
+        });
+
+        foreach (var (addr, chain) in resolved)
+            _watch.Add(new WatchEntry { Address = addr, Kind = _lastKind, Size = _lastSize, Chain = chain });
 
         _watchOrderStale = true;
         TuneMonitorRate();
         _watchGrid.RowCount = _watch.Count;
         _watchGrid.Invalidate();
+        _resolvePtr.Enabled = true;
 
-        SetStatus($"Resolved {added} chain(s) onto the watch list" +
-                  (broken > 0 ? $", {broken} no longer valid." : "."),
-                  added > 0 ? Theme.Good : Theme.Warn);
+        int healed = resolved.Count(r => r.Chain.Fingerprint is not null);
+        SetStatus($"Resolved {resolved.Count} chain(s) onto the watch list" +
+                  (broken > 0 ? $", {broken} no longer valid." : ".") +
+                  (healed > 0 ? $" {healed} self-healing." : ""),
+                  resolved.Count > 0 ? Theme.Good : Theme.Warn);
+    }
+
+    /// <summary>Captures a fingerprint for a chain's module-level holder, if one can be found.</summary>
+    private static PointerChain WithFingerprint(
+        ProcessMemory mem, List<(string Name, ulong Base, ulong Size)> modules, PointerChain chain)
+    {
+        ulong moduleBase = modules.FirstOrDefault(m =>
+            string.Equals(m.Name, chain.Module, StringComparison.OrdinalIgnoreCase)).Base;
+        if (moduleBase == 0) return chain;
+
+        var fingerprint = ChainFingerprint.Capture(mem, chain.Module, moduleBase + chain.ModuleOffset);
+        return fingerprint is null ? chain : chain with { Fingerprint = fingerprint };
     }
 
     private void SaveChains()
@@ -1885,6 +1925,178 @@ internal sealed class MainForm : Form
         _watchGrid.ClearSelection();
         _watchGrid.Invalidate();
     }
+
+    /// <summary>
+    /// Compiles a standalone Windows .exe that finds and can hold whatever is selected
+    /// on the watch list right now, with no dependency on this app afterward. A row that
+    /// came from a resolved pointer chain survives the target restarting; a row with
+    /// only a raw address only works for this exact run of the process.
+    /// </summary>
+    private async Task BuildTrainer()
+    {
+        if (_target is null) { SetStatus("Attach to a process first.", Theme.Warn); return; }
+        if (_watch.Count == 0) { SetStatus("Nothing on the watch list to build a trainer from.", Theme.Warn); return; }
+
+        var rows = _watchGrid.SelectedRows.Cast<DataGridViewRow>()
+            .Select(r => r.Index)
+            .Where(i => i >= 0 && i < _watch.Count)
+            .OrderBy(i => i)
+            .ToList();
+        var entries = (rows.Count > 0 ? rows.Select(i => _watch[i]) : _watch).ToList();
+
+        int withoutChain = entries.Count(w => w.Chain is null);
+        if (withoutChain > 0)
+        {
+            var choice = MessageBox.Show(this,
+                $"{withoutChain} of {entries.Count} selected value(s) have no saved pointer chain " +
+                "(use \"Find pointer chains\" first if you want one). The trainer will fall back to " +
+                $"the exact address seen right now in {_target.Process.ProcessName} - that only works " +
+                "while this run of the process stays up, and won't survive a restart.\n\nBuild anyway?",
+                "Build trainer", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
+            if (choice != DialogResult.OK) return;
+        }
+
+        string? repoRoot = FindRepoRoot();
+        if (repoRoot is null)
+        {
+            SetStatus("Can't find the MemReaderTrainer project source next to this build - " +
+                      "build a trainer from a full repo checkout, not a standalone release copy.", Theme.Warn);
+            return;
+        }
+
+        using var save = new SaveFileDialog
+        {
+            Title = "Save trainer as",
+            Filter = "Windows application (*.exe)|*.exe",
+            FileName = $"{_target.Process.ProcessName}Trainer.exe",
+        };
+        if (save.ShowDialog(this) != DialogResult.OK) return;
+
+        string processName = _target.Process.ProcessName;
+        string targetsSource = GenerateTargetsSource(processName, entries);
+        string tempRoot = Path.Combine(Path.GetTempPath(), "MemReaderTrainerBuild_" + Guid.NewGuid().ToString("N"));
+
+        _buildTrainer.Enabled = false;
+        SetStatus("Building trainer - this takes longer than a scan, hang on...", Theme.Accent);
+
+        try
+        {
+            await Task.Run(() =>
+            {
+                CopyDirectory(repoRoot, tempRoot);
+
+                string trainerDir = Path.Combine(tempRoot, "MemReaderTrainer");
+                File.WriteAllText(Path.Combine(trainerDir, "GeneratedTargets.cs"), targetsSource);
+
+                string publishDir = Path.Combine(tempRoot, "publish");
+                RunDotnetPublish(Path.Combine(trainerDir, "MemReaderTrainer.csproj"), publishDir);
+
+                File.Copy(Path.Combine(publishDir, "MemReaderTrainer.exe"), save.FileName, overwrite: true);
+            });
+
+            SetStatus($"Trainer saved to {save.FileName}.", Theme.Good);
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Build failed: {ex.Message}", Theme.Warn);
+        }
+        finally
+        {
+            _buildTrainer.Enabled = true;
+            try { Directory.Delete(tempRoot, recursive: true); } catch { /* best effort cleanup */ }
+        }
+    }
+
+    /// <summary>Walks up from this exe's own folder to find the repo checkout it was built from.</summary>
+    private static string? FindRepoRoot()
+    {
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "MemReaderTrainer", "MemReaderTrainer.csproj")))
+                return dir.FullName;
+        }
+        return null;
+    }
+
+    /// <summary>Copies the repo checkout needed to build the trainer, skipping build output.</summary>
+    private static void CopyDirectory(string sourceDir, string destDir)
+    {
+        Directory.CreateDirectory(destDir);
+        foreach (var dir in Directory.EnumerateDirectories(sourceDir))
+        {
+            string name = Path.GetFileName(dir);
+            if (name is "bin" or "obj" or "dist" or ".git") continue;
+            CopyDirectory(dir, Path.Combine(destDir, name));
+        }
+        foreach (var file in Directory.EnumerateFiles(sourceDir))
+            File.Copy(file, Path.Combine(destDir, Path.GetFileName(file)), overwrite: true);
+    }
+
+    private static void RunDotnetPublish(string csprojPath, string outputDir)
+    {
+        var psi = new ProcessStartInfo("dotnet",
+            $"publish \"{csprojPath}\" -c Release -r win-x64 --self-contained true " +
+            "-p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true " +
+            $"-o \"{outputDir}\"")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+
+        using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Could not start dotnet.");
+        string stdout = proc.StandardOutput.ReadToEnd();
+        string stderr = proc.StandardError.ReadToEnd();
+        proc.WaitForExit();
+
+        if (proc.ExitCode != 0)
+            throw new InvalidOperationException($"dotnet publish failed (exit {proc.ExitCode}):\n{stdout}\n{stderr}");
+    }
+
+    /// <summary>Renders the picked watch entries as the GeneratedTargets.cs the trainer publishes with.</summary>
+    private static string GenerateTargetsSource(string processName, IReadOnlyList<WatchEntry> entries)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("namespace MemReader;");
+        sb.AppendLine();
+        sb.AppendLine("/// <summary>Generated by MemReader's \"Build Trainer\" - do not edit by hand.</summary>");
+        sb.AppendLine("internal static class GeneratedTargets");
+        sb.AppendLine("{");
+        sb.AppendLine($"    public const string ProcessName = \"{EscapeCSharpString(processName)}\";");
+        sb.AppendLine();
+        sb.AppendLine("    public static readonly TrainerTarget[] Targets =");
+        sb.AppendLine("    {");
+
+        foreach (var w in entries)
+        {
+            string label = EscapeCSharpString($"{w.TypeName} @ {w.Address.ToInt64():X}");
+            string module = w.Chain is null ? "null" : $"\"{EscapeCSharpString(w.Chain.Module)}\"";
+            string moduleOffset = w.Chain is null ? "0" : $"0x{w.Chain.ModuleOffset:X}UL";
+            string offsets = w.Chain is null || w.Chain.Offsets.Length == 0
+                ? "Array.Empty<int>()"
+                : $"new int[] {{ {string.Join(", ", w.Chain.Offsets)} }}";
+            string frozen = w.Frozen && w.Locked is { } bytes
+                ? $"new byte[] {{ {string.Join(", ", bytes)} }}"
+                : "null";
+            string fpPattern = w.Chain?.Fingerprint is { } fp
+                ? $"new byte[] {{ {string.Join(", ", fp.Pattern)} }}"
+                : "null";
+            string fpWildcard = w.Chain?.Fingerprint is { } fpw
+                ? $"new bool[] {{ {string.Join(", ", fpw.Wildcard.Select(b => b ? "true" : "false"))} }}"
+                : "null";
+            int fpInstructionOffset = w.Chain?.Fingerprint?.InstructionOffset ?? 0;
+
+            sb.AppendLine($"        new(\"{label}\", ValueKind.{w.Kind}, {w.Size}, {module}, {moduleOffset}, " +
+                          $"{offsets}, {w.Address.ToInt64()}L, {frozen}, {fpPattern}, {fpWildcard}, {fpInstructionOffset}),");
+        }
+
+        sb.AppendLine("    };");
+        sb.AppendLine("}");
+        return sb.ToString();
+    }
+
+    private static string EscapeCSharpString(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
 
     /// <summary>
     /// Writes the scan-bar value to every hit at once. Handy when a scan leaves a

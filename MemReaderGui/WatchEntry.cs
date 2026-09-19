@@ -13,6 +13,13 @@ internal sealed class WatchEntry
     public required ValueKind Kind { get; set; }
     public required int Size { get; set; }
 
+    /// <summary>
+    /// The route that found this address, when it came from a pointer scan. A trainer
+    /// built from this entry uses it to re-find the value after the target restarts;
+    /// without one, the trainer can only fall back to this session's raw address.
+    /// </summary>
+    public PointerChain? Chain { get; init; }
+
     /// <summary>The bytes rewritten on every freeze tick. Null until the value is set or frozen.</summary>
     public byte[]? Locked { get; set; }
 

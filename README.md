@@ -8,8 +8,10 @@ memory-scanning core, built from scratch in C#/.NET. Find a value you can see
 it, freeze it, and build a pointer chain that still finds it after the target
 restarts.
 
-Two builds share one core: a **GUI** for interactive use, and a **console**
-build that scripts from a shell for automation and testing.
+Three builds share one core: a **GUI** for interactive use, a **console**
+build that scripts from a shell for automation and testing, and a
+**standalone trainer** template the GUI compiles on demand from whatever you
+select on the watch list.
 
 ![MemReader](docs/screenshot.png)
 
@@ -40,9 +42,11 @@ violation is *where* you point it, not the code.
 | **Watch list** | Live values, editable in place, per-row freeze |
 | **Change log** | Every write to a watched address, timestamped, with before → after |
 | **Pointer chains** | Find a route from a stable module base to a value; save it; reload it after the target restarts and it still resolves |
+| **Self-healing offsets** | A chain's module-level entry point is fingerprinted by the code that references it; if a patch shifts it, a rescan of the module's code re-finds the pointer instead of the chain just breaking |
 | **Correlation detector** | Mark a moment (a global hotkey) across a few repetitions and rank candidates by how tightly they track your marks — finds a value with no visible number, fast, without a scan chain that a GC can break |
 | **Write journal** | Every deliberate write (a manual edit, "write to all results") logged with before/after; undo one entry or every write this session |
 | **Disassembler** | Real x86-64 instructions at any address (via Iced), not just raw hex — see the code that touches a value, not only the value itself |
+| **Standalone trainer** | Build a self-contained .exe from selected watch-list values — no MemReader install needed to run it, and it inherits the self-healing chains behind those values |
 | **Multi-threaded scan** | Regions scanned in parallel — about 2× faster on multi-GB processes |
 | **Console mode** | Full CLI with the same core; scriptable, pipeable, used for this project's own tests |
 
@@ -57,6 +61,7 @@ git clone https://github.com/Even2B/memreader.git
 cd memreader
 dotnet build MemReader          # console
 dotnet build MemReaderGui       # gui
+dotnet build MemReaderTrainer   # standalone trainer template (built for you by the GUI)
 ```
 
 Run the GUI, filter for a process, **Attach**, then scan. `Console mode` in
@@ -74,9 +79,19 @@ there instead.
 - `PointerScanner` — indexes every pointer-shaped value in the process, then
   walks backward from an address to something inside a loaded module (the
   only part of a process's layout that's the same across restarts)
+- `ChainFingerprint` — the self-healing half of a pointer chain: decodes the
+  module's code (via Iced) to find the instruction that loads the chain's
+  static holder, and fingerprints it as a wildcarded byte pattern so a patch
+  that moves the holder can still be found by rescanning for that instruction
 
-The GUI and console projects each reference the same `.cs` files from the
-other's folder rather than duplicating logic — one core, two front ends.
+The GUI, console, and trainer projects each reference the same `.cs` files
+from one another's folders rather than duplicating logic — one core, three
+front ends.
+
+A saved chain only carries a fingerprint once it's been resolved onto a watch
+list — that's the point where a chain has been kept rather than just found,
+so it's the point worth paying to fingerprint. A `.chains` file saved before
+that step won't have one; resolve it once and it will.
 
 ## Known limitations
 
@@ -101,9 +116,6 @@ Not yet built, in rough priority order:
 - **A real breakpoint** — catch the exact instruction that writes an address
   (`DebugActiveProcess` + a hardware or software breakpoint) instead of
   finding a value only by narrowing a scan
-- **Self-healing offsets** — fingerprint a found address by its surrounding
-  byte pattern so a saved chain can re-find itself after a game patch shifts
-  offsets, not just after a restart
 - **Value timeline graphs** — plot a watched address over time instead of
   reading a scrolling number
 

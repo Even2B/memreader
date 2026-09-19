@@ -7,22 +7,27 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <PlatformTarget>x64</PlatformTarget>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <AssemblyName>MemReaderGui</AssemblyName>
+    <AssemblyName>MemReaderTrainer</AssemblyName>
     <RootNamespace>MemReader</RootNamespace>
     <ApplicationIcon>..\assets\icon.ico</ApplicationIcon>
   </PropertyGroup>
 
-  <!-- Share the scanner core with the console build rather than forking it. -->
+  <!--
+    MainForm's "Build Trainer" step copies this whole project to a temp folder,
+    overwrites GeneratedTargets.cs with the real process name and targets, and
+    publishes it there - so GeneratedTargets.cs is the one file in this project
+    that a build is expected to replace.
+  -->
+
+  <!-- Share the scanner core with the other two front ends rather than forking it. -->
   <ItemGroup>
     <Compile Include="..\MemReader\Native.cs" Link="Core\Native.cs" />
     <Compile Include="..\MemReader\ProcessMemory.cs" Link="Core\ProcessMemory.cs" />
     <Compile Include="..\MemReader\Scanner.cs" Link="Core\Scanner.cs" />
-    <Compile Include="..\MemReader\DeltaScanner.cs" Link="Core\DeltaScanner.cs" />
     <Compile Include="..\MemReader\PointerScanner.cs" Link="Core\PointerScanner.cs" />
     <Compile Include="..\MemReader\ChainFingerprint.cs" Link="Core\ChainFingerprint.cs" />
-    <Compile Include="..\MemReader\CorrelationDetector.cs" Link="Core\CorrelationDetector.cs" />
-    <Compile Include="..\MemReader\WriteJournal.cs" Link="Core\WriteJournal.cs" />
-    <Compile Include="..\MemReader\Disassembler.cs" Link="Core\Disassembler.cs" />
+    <Compile Include="..\MemReaderGui\WatchEntry.cs" Link="Core\WatchEntry.cs" />
+    <Compile Include="..\MemReaderGui\Theme.cs" Link="Core\Theme.cs" />
   </ItemGroup>
 
   <ItemGroup>
