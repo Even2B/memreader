@@ -9,6 +9,7 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>MemReaderGui</AssemblyName>
     <RootNamespace>MemReader</RootNamespace>
+    <ApplicationIcon>..\assets\icon.ico</ApplicationIcon>
   </PropertyGroup>
 
   <!-- Share the scanner core with the console build rather than forking it. -->
@@ -18,5 +19,6 @@
     <Compile Include="..\MemReader\Scanner.cs" Link="Core\Scanner.cs" />
     <Compile Include="..\MemReader\DeltaScanner.cs" Link="Core\DeltaScanner.cs" />
     <Compile Include="..\MemReader\PointerScanner.cs" Link="Core\PointerScanner.cs" />
+    <Compile Include="..\MemReader\CorrelationDetector.cs" Link="Core\CorrelationDetector.cs" />
   </ItemGroup>
 </Project>

@@ -87,6 +87,48 @@ internal sealed class ProcessMemory : IDisposable
         Native.ReadProcessMemory(_handle, address, buffer, size, out var got) && (int)got == size;
 
     /// <summary>
+    /// Reads many addresses efficiently by coalescing ones that share a small block of
+    /// memory into a single call - a per-address read costs a syscall each, which adds
+    /// up fast once a watch list or correlation capture reaches thousands of entries.
+    /// </summary>
+    /// <param name="ascendingAddresses">Must already be sorted ascending - the caller
+    /// (a scan result, a watch list snapshot) typically already is.</param>
+    /// <param name="sizeAt">Byte width of the value at index i - a plain scan reads every
+    /// address at one uniform size, but a mixed watch list needs this per entry.</param>
+    public byte[]?[] ReadMany(IReadOnlyList<IntPtr> ascendingAddresses, Func<int, int> sizeAt)
+    {
+        const int Block = 64 * 1024;
+        var result = new byte[]?[ascendingAddresses.Count];
+
+        int i = 0;
+        while (i < ascendingAddresses.Count)
+        {
+            long start = ascendingAddresses[i].ToInt64();
+            int j = i;
+            while (j < ascendingAddresses.Count &&
+                   ascendingAddresses[j].ToInt64() + sizeAt(j) - start <= Block) j++;
+
+            int span = (int)(ascendingAddresses[j - 1].ToInt64() + sizeAt(j - 1) - start);
+            var buf = Read((IntPtr)start, span);
+
+            if (buf is not null)
+                for (int k = i; k < j; k++)
+                {
+                    int off = (int)(ascendingAddresses[k].ToInt64() - start);
+                    result[k] = buf.AsSpan(off, sizeAt(k)).ToArray();
+                }
+
+            i = j;
+        }
+
+        return result;
+    }
+
+    /// <summary>Convenience for the common case: every address holds the same value size.</summary>
+    public byte[]?[] ReadMany(IReadOnlyList<IntPtr> ascendingAddresses, int size) =>
+        ReadMany(ascendingAddresses, _ => size);
+
+    /// <summary>
     /// The loaded modules, with the address range each occupies. An address inside a
     /// module is the same offset from that module every run, which is what makes a
     /// pointer chain survive a restart.

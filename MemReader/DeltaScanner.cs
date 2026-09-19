@@ -81,13 +81,17 @@ internal sealed class DeltaScan
         {
             if (!IsCandidateRegion(region)) continue;
 
-            long size = region.RegionSize.ToInt64();
+            // Stop when the BUDGET is nearly gone, not when this particular region
+            // happens to be small - almost every process has plenty of small early
+            // heap chunks, and bailing on the first one would empty the whole scan.
+            long remaining = MaxSnapshotBytes - taken;
+            if (remaining < Chunk) { scan.SnapshotIncomplete = true; break; }
 
             // A JVM heap is one region larger than the whole budget. Capturing part of
             // it beats skipping it, since that is exactly where the values live.
-            long take = Math.Min(size, MaxSnapshotBytes - taken);
+            long size = region.RegionSize.ToInt64();
+            long take = Math.Min(size, remaining);
             if (take < size) scan.SnapshotIncomplete = true;
-            if (take < Chunk) break;
 
             var data = mem.Read(region.BaseAddress, (int)take);
             if (data is null) continue;
@@ -95,7 +99,6 @@ internal sealed class DeltaScan
             scan._snapshot.Add((region.BaseAddress, data));
             taken += take;
             progress?.Invoke(taken);
-            if (taken >= MaxSnapshotBytes) break;
         }
 
         scan.SnapshotBytes = taken;
@@ -159,7 +162,8 @@ internal sealed class DeltaScan
 
         var keptAddr = new List<IntPtr>();
         var keptPrev = new List<byte>();
-        var current = ReadCurrent(progress);
+        var current = _mem.ReadMany(_addrs!, Size);
+        progress?.Invoke(_addrs!.Length);
 
         for (int i = 0; i < _addrs.Length; i++)
         {
@@ -173,39 +177,6 @@ internal sealed class DeltaScan
 
         _addrs = keptAddr.ToArray();
         _prev = keptPrev.ToArray();
-    }
-
-    /// <summary>
-    /// Reads every candidate, coalescing addresses that share a block into one call.
-    /// A per-address read costs a syscall each, which is ruinous at millions of hits.
-    /// </summary>
-    private byte[]?[] ReadCurrent(Action<long>? progress)
-    {
-        const int Block = 64 * 1024;
-        var result = new byte[]?[_addrs!.Length];
-
-        int i = 0;
-        while (i < _addrs.Length)
-        {
-            long start = _addrs[i].ToInt64();
-            int j = i;
-            while (j < _addrs.Length && _addrs[j].ToInt64() + Size - start <= Block) j++;
-
-            int span = (int)(_addrs[j - 1].ToInt64() + Size - start);
-            var buf = _mem.Read((IntPtr)start, span);
-
-            if (buf is not null)
-                for (int k = i; k < j; k++)
-                {
-                    int off = (int)(_addrs[k].ToInt64() - start);
-                    result[k] = buf.AsSpan(off, Size).ToArray();
-                }
-
-            i = j;
-            progress?.Invoke(i);
-        }
-
-        return result;
     }
 
     private bool Passes(Delta delta, double amount, ReadOnlySpan<byte> old, ReadOnlySpan<byte> now)

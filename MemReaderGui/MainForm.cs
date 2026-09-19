@@ -76,6 +76,19 @@ internal sealed class MainForm : Form
     private readonly Button _loadPtr = new();
     private PointerScanner? _ptrScan;
     private List<PointerChain> _chains = new();
+
+    // --- correlation detector: find a value by marking moments, not typing numbers ---
+    private const int MarkHotkeyId = 0xC077; // arbitrary id, just needs to be unique to this app
+    private const uint MarkHotkeyVk = 0x77;  // VK_F8 - rarely bound in games or Windows itself
+    private readonly Button _corrStart = new();
+    private readonly Button _corrMark = new();
+    private readonly Button _corrStop = new();
+    private readonly Label _corrStatus = new();
+    private readonly DataGridView _corrGrid = new();
+    private readonly Button _corrAddToWatch = new();
+    private CorrelationDetector? _correlation;
+    private List<CorrelationResult> _corrResults = new();
+    private bool _hotkeyRegistered;
     private readonly System.Windows.Forms.Timer _monitor = new();
     private int _tickCost;
     private const int MaxLogEntries = 500;
@@ -619,6 +632,7 @@ internal sealed class MainForm : Form
         _tabs.TabPages.Add(dumpTab);
         _tabs.TabPages.Add(logTab);
         _tabs.TabPages.Add(BuildPointerTab());
+        _tabs.TabPages.Add(BuildCorrelateTab());
         _rightSplit.Panel2.Controls.Add(_tabs);
 
         return _rightSplit;
@@ -673,6 +687,97 @@ internal sealed class MainForm : Form
         buttons.Controls.Add(_loadPtr);
 
         pane.Controls.Add(buttons, 0, 1);
+        page.Controls.Add(pane);
+        return page;
+    }
+
+    private TabPage BuildCorrelateTab()
+    {
+        var page = new TabPage("Correlate") { BackColor = Theme.Field, Padding = new Padding(2) };
+
+        var pane = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, BackColor = Theme.Field,
+        };
+        pane.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        pane.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        pane.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        pane.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        var intro = new Label
+        {
+            Text = "Don't know which candidate is right? Start a capture, alt-tab to the game, " +
+                   "press F8 the instant something happens (took damage, bought an item) a few " +
+                   "times, then Stop. The address that changed near every press - and nowhere " +
+                   "else - is ranked first.",
+            ForeColor = Theme.Muted,
+            AutoSize = false,
+            Dock = DockStyle.Fill,
+            Height = 48,
+        };
+        pane.Controls.Add(intro, 0, 0);
+
+        var buttons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill, AutoSize = true, BackColor = Theme.Field,
+            Margin = new Padding(0, 6, 0, 6), WrapContents = false,
+        };
+
+        _corrStart.Text = "Start capture";
+        _corrStart.Width = 110;
+        StyleButton(_corrStart, primary: true);
+        buttons.Controls.Add(_corrStart);
+
+        _corrMark.Text = "Mark  (F8)";
+        _corrMark.Width = 100;
+        _corrMark.Enabled = false;
+        StyleButton(_corrMark, primary: false);
+        buttons.Controls.Add(_corrMark);
+
+        _corrStop.Text = "Stop && rank";
+        _corrStop.Width = 100;
+        _corrStop.Enabled = false;
+        StyleButton(_corrStop, primary: false);
+        buttons.Controls.Add(_corrStop);
+
+        _corrStatus.Text = "Get some results (First Scan or Snapshot+Filter), then Start capture.";
+        _corrStatus.ForeColor = Theme.Muted;
+        _corrStatus.AutoSize = true;
+        _corrStatus.Margin = new Padding(12, 7, 0, 0);
+        buttons.Controls.Add(_corrStatus);
+
+        pane.Controls.Add(buttons, 0, 1);
+
+        _corrGrid.Dock = DockStyle.Fill;
+        _corrGrid.VirtualMode = true;
+        _corrGrid.ReadOnly = true;
+        _corrGrid.AllowUserToAddRows = false;
+        _corrGrid.RowHeadersVisible = false;
+        _corrGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        _corrGrid.MultiSelect = true;
+        _corrGrid.BackgroundColor = Theme.Field;
+        _corrGrid.BorderStyle = BorderStyle.FixedSingle;
+        _corrGrid.GridColor = Theme.Border;
+        _corrGrid.EnableHeadersVisualStyles = false;
+        _corrGrid.ColumnHeadersDefaultCellStyle.BackColor = Theme.Panel;
+        _corrGrid.ColumnHeadersDefaultCellStyle.ForeColor = Theme.Muted;
+        _corrGrid.DefaultCellStyle.BackColor = Theme.Field;
+        _corrGrid.DefaultCellStyle.ForeColor = Theme.Text;
+        _corrGrid.DefaultCellStyle.SelectionBackColor = Theme.Accent;
+        _corrGrid.DefaultCellStyle.SelectionForeColor = Color.Black;
+        _corrGrid.DefaultCellStyle.Font = Theme.Mono;
+        _corrGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Address", Width = 160 });
+        _corrGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Hits", Width = 70 });
+        _corrGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Noise", Width = 70 });
+        pane.Controls.Add(_corrGrid, 0, 2);
+
+        _corrAddToWatch.Text = "Add selected to watch";
+        _corrAddToWatch.Width = 160;
+        _corrAddToWatch.Enabled = false;
+        StyleButton(_corrAddToWatch, primary: false);
+        _corrAddToWatch.Margin = new Padding(0, 6, 0, 0);
+        pane.Controls.Add(_corrAddToWatch, 0, 3);
+
         page.Controls.Add(pane);
         return page;
     }
@@ -732,6 +837,12 @@ internal sealed class MainForm : Form
         _grid.SelectionChanged += (_, _) => ShowDump();
 
         _consoleMode.Click += (_, _) => SwitchToConsole();
+        _corrStart.Click += (_, _) => StartCorrelation();
+        _corrMark.Click += (_, _) => MarkCorrelationEvent();
+        _corrStop.Click += (_, _) => StopCorrelation();
+        _corrAddToWatch.Click += (_, _) => AddCorrelationSelectionToWatch();
+        _corrGrid.CellValueNeeded += OnCorrGridValueNeeded;
+
         _findPtr.Click += async (_, _) => await FindPointerChains();
         _resolvePtr.Click += (_, _) => ResolveChainsToWatch();
         _savePtr.Click += (_, _) => SaveChains();
@@ -787,7 +898,13 @@ internal sealed class MainForm : Form
         _monitor.Tick += (_, _) => MonitorWatched();
         _monitor.Start();
 
-        FormClosed += (_, _) => { _live.Stop(); _freeze.Stop(); _monitor.Stop(); _target?.Dispose(); };
+        FormClosed += (_, _) =>
+        {
+            _live.Stop(); _freeze.Stop(); _monitor.Stop();
+            if (_hotkeyRegistered) Native.UnregisterHotKey(Handle, MarkHotkeyId);
+            _correlation?.Dispose();
+            _target?.Dispose();
+        };
     }
 
     private void RefreshProcesses()
@@ -867,6 +984,10 @@ internal sealed class MainForm : Form
 
         try
         {
+            // A capture polling the old handle must stop before that handle closes,
+            // or its background loop reads through a disposed ProcessMemory.
+            if (_correlation is not null) StopCorrelation();
+
             _target?.Dispose();
             _target = ProcessMemory.Open(pid);
             ResetResults();
@@ -875,6 +996,9 @@ internal sealed class MainForm : Form
             _watchOrderStale = true;
             TuneMonitorRate();
             _watchGrid.RowCount = 0;
+            _corrResults = new List<CorrelationResult>();
+            _corrGrid.RowCount = 0;
+            _corrAddToWatch.Enabled = false;
 
             _attached.Text = $"Attached to {_target.Process.ProcessName}  (PID {_target.Process.Id}, " +
                              $"{(_target.Is32Bit ? "32-bit" : "64-bit")})  -  " +
@@ -1061,6 +1185,118 @@ internal sealed class MainForm : Form
         };
 
         return candidates.FirstOrDefault(File.Exists);
+    }
+
+    // ---------------------------------------------------------------- correlation
+
+    /// <summary>Catches WM_HOTKEY so F8 marks an event even while another window has focus.</summary>
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == Native.WM_HOTKEY && m.WParam.ToInt32() == MarkHotkeyId)
+            MarkCorrelationEvent();
+        base.WndProc(ref m);
+    }
+
+    private void StartCorrelation()
+    {
+        if (_target is null) { SetCorrStatus("Attach to a process first.", Theme.Warn); return; }
+        if (_results.Count == 0) { SetCorrStatus("No candidates - run a scan first.", Theme.Warn); return; }
+        if (_correlation is not null) { SetCorrStatus("Already capturing.", Theme.Warn); return; }
+        if (!DeltaScan.Supports(_lastKind))
+        {
+            SetCorrStatus("Correlation needs a number type (Int 32/64, Float, Double).", Theme.Warn);
+            return;
+        }
+
+        _hotkeyRegistered = Native.RegisterHotKey(Handle, MarkHotkeyId, Native.MOD_NOREPEAT, MarkHotkeyVk);
+
+        _correlation = new CorrelationDetector(_target, _results, _lastSize);
+        _correlation.StartCapture(SelectedPollInterval());
+
+        _corrStart.Enabled = false;
+        _corrMark.Enabled = true;
+        _corrStop.Enabled = true;
+        SetCorrStatus(_hotkeyRegistered
+            ? $"Capturing {_results.Count:N0} candidate(s). Press F8 anywhere the instant the event happens."
+            : $"Capturing {_results.Count:N0} candidate(s). F8 is taken by another app - use the Mark button instead.",
+            Theme.Accent);
+    }
+
+    private void MarkCorrelationEvent()
+    {
+        if (_correlation is null) return;
+        _correlation.Mark();
+        SetCorrStatus($"Marked ({_correlation.MarkCount}) - {_correlation.TickCount:N0} samples so far.", Theme.Accent);
+    }
+
+    private void StopCorrelation()
+    {
+        if (_correlation is null) return;
+
+        if (_hotkeyRegistered) { Native.UnregisterHotKey(Handle, MarkHotkeyId); _hotkeyRegistered = false; }
+
+        var marks = _correlation.MarkCount;
+        _corrResults = _correlation.StopAndScore();
+        _correlation.Dispose();
+        _correlation = null;
+
+        _corrStart.Enabled = true;
+        _corrMark.Enabled = false;
+        _corrStop.Enabled = false;
+        _corrAddToWatch.Enabled = _corrResults.Count > 0;
+
+        _corrGrid.RowCount = Math.Min(_corrResults.Count, 500);
+        _corrGrid.Invalidate();
+
+        var best = _corrResults.FirstOrDefault();
+        SetCorrStatus(best is null
+            ? "No candidates scored."
+            : $"{_corrResults.Count:N0} candidate(s) ranked against {marks} mark(s). " +
+              $"Top: {best.Address.ToInt64():X} - hits {best.Hits}/{marks}, noise {best.NoiseChanges}.",
+            Theme.Good);
+    }
+
+    private void OnCorrGridValueNeeded(object? sender, DataGridViewCellValueEventArgs e)
+    {
+        if (e.RowIndex < 0 || e.RowIndex >= _corrResults.Count) return;
+        var r = _corrResults[e.RowIndex];
+        e.Value = e.ColumnIndex switch
+        {
+            0 => $"{r.Address.ToInt64():X16}",
+            1 => $"{r.Hits}/{r.TotalMarks}",
+            _ => r.NoiseChanges.ToString(),
+        };
+    }
+
+    private void AddCorrelationSelectionToWatch()
+    {
+        var picked = _corrGrid.SelectedRows.Cast<DataGridViewRow>()
+            .Select(r => r.Index)
+            .Where(i => i >= 0 && i < _corrResults.Count)
+            .ToList();
+        if (picked.Count == 0) { SetCorrStatus("Select a row first.", Theme.Warn); return; }
+
+        var known = _watch.Select(w => w.Address).ToHashSet();
+        int added = 0;
+        foreach (int i in picked)
+        {
+            var addr = _corrResults[i].Address;
+            if (!known.Add(addr)) continue;
+            _watch.Add(new WatchEntry { Address = addr, Kind = _lastKind, Size = _lastSize });
+            added++;
+        }
+
+        _watchOrderStale = true;
+        TuneMonitorRate();
+        _watchGrid.RowCount = _watch.Count;
+        _watchGrid.Invalidate();
+        SetCorrStatus($"Added {added} address(es) to the watch list.", Theme.Muted);
+    }
+
+    private void SetCorrStatus(string text, Color color)
+    {
+        _corrStatus.Text = text;
+        _corrStatus.ForeColor = color;
     }
 
     // ----------------------------------------------------------- pointer chains
@@ -1507,42 +1743,26 @@ internal sealed class MainForm : Form
             _watchOrderStale = false;
         }
 
-        const int Block = 64 * 1024;
+        var addrs = _watchOrder.Select(i => _watch[i].Address).ToList();
+        var current = _target.ReadMany(addrs, i => _watch[_watchOrder[i]].Size);
         int logged = 0;
 
-        int k = 0;
-        while (k < _watchOrder.Length)
+        for (int i = 0; i < _watchOrder.Length; i++)
         {
-            // One read covers every watched address inside the next 64 KB.
-            long start = _watch[_watchOrder[k]].Address.ToInt64();
-            int end = k;
-            while (end < _watchOrder.Length &&
-                   _watch[_watchOrder[end]].Address.ToInt64() + _watch[_watchOrder[end]].Size - start <= Block)
-                end++;
+            if (current[i] is not { } now) continue;
+            var w = _watch[_watchOrder[i]];
 
-            var last = _watch[_watchOrder[end - 1]];
-            var buf = _target.Read((IntPtr)start, (int)(last.Address.ToInt64() + last.Size - start));
+            if (w.Seen is null) { w.Seen = now; continue; }
+            if (now.AsSpan().SequenceEqual(w.Seen)) continue;
 
-            if (buf is not null)
-                for (int i = k; i < end; i++)
-                {
-                    var w = _watch[_watchOrder[i]];
-                    var now = buf.AsSpan((int)(w.Address.ToInt64() - start), w.Size).ToArray();
-
-                    if (w.Seen is null) { w.Seen = now; continue; }
-                    if (now.AsSpan().SequenceEqual(w.Seen)) continue;
-
-                    if (!w.Frozen)
-                    {
-                        w.Changes++;
-                        w.ChangedAt = DateTime.Now;
-                        // A thousand rows changing at once would bury the log in one tick.
-                        if (_logging.Checked && logged < 20) { LogChange(w, w.Seen, now); logged++; }
-                    }
-                    w.Seen = now;
-                }
-
-            k = end;
+            if (!w.Frozen)
+            {
+                w.Changes++;
+                w.ChangedAt = DateTime.Now;
+                // A thousand rows changing at once would bury the log in one tick.
+                if (_logging.Checked && logged < 20) { LogChange(w, w.Seen, now); logged++; }
+            }
+            w.Seen = now;
         }
 
         if (logged >= 20 && _logging.Checked)

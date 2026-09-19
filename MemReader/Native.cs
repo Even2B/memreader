@@ -132,6 +132,19 @@ internal static class Native
     public static extern int GetModuleBaseNameW(
         IntPtr hProcess, IntPtr module, System.Text.StringBuilder name, int size);
 
+    // --- Global hotkey: lets "Mark" fire while the game, not this app, has focus. ---
+
+    public const int WM_HOTKEY = 0x0312;
+    public const uint MOD_NOREPEAT = 0x4000;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
     /// <summary>Best-effort enable of SeDebugPrivilege. Silently no-ops without admin.</summary>
     public static bool TryEnableDebugPrivilege()
     {

@@ -1,3 +1,5 @@
+<img src="docs/mascot.jpg" alt="MemReader mascot" width="140" align="right">
+
 # MemReader
 
 A Windows process memory scanner and editor — the same idea as Cheat Engine's

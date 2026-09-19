@@ -18,6 +18,7 @@ List<IntPtr> results = new();
 DeltaScan? deltaScan = null;
 PointerScanner? pointers = null;
 List<PointerChain> chains = new();
+CorrelationDetector? correlation = null;
 
 // A PID on the command line attaches straight away, so handing over from the GUI
 // continues the same session instead of starting from nothing. This has to sit after
@@ -65,6 +66,10 @@ try
                 case "ptrresolve": ResolveChains(); break;
                 case "ptrsave": SaveChains(rest); break;
                 case "ptrload": LoadChains(rest); break;
+                case "addaddr": AddAddr(rest); break;
+                case "corrstart": CorrStart(rest); break;
+                case "corrmark": CorrMark(); break;
+                case "corrstop": CorrStop(rest); break;
                 case "exit" or "quit": return;
                 default: Console.WriteLine($"Unknown command '{cmd}'. Try 'help'."); break;
             }
@@ -85,6 +90,7 @@ void PrintHelp() => Console.WriteLine("""
   scan <type> <value>    fresh scan of the whole address space
   next <value>           re-scan current results for a new value
   list [n]               show current result addresses (default 20)
+  addaddr <hex>          add one known address to the results (e.g. from a hex dump)
   read <addr> [len]      hex dump at an address (hex ok: 0x7ff...), default 128 bytes
   write <addr> <value>   write one address, using the last scan's type
   writeall <value>       write every current result
@@ -96,6 +102,11 @@ void PrintHelp() => Console.WriteLine("""
   ptrresolve             resolve each chain against the process right now
   ptrsave <file>         write chains to a file
   ptrload <file>         read chains back in a later session
+
+  correlation detector (find a value with no visible number, fast)
+  corrstart <type> [ms]   watch the current results, polling every [ms] (default 100)
+  corrmark                record that an event just happened - press this at the moment
+  corrstop [n]            stop, rank candidates by hits vs noise, show top n (default 15)
 
   don't know the value?
   snapshot [type]        copy the target's private memory as a baseline (default i32)
@@ -374,6 +385,55 @@ void LoadChains(string path)
     chains = PointerScanner.Load(File.ReadAllText(path));
     Console.WriteLine($"loaded {chains.Count:N0} chain(s)");
     ListChains();
+}
+
+void AddAddr(string arg)
+{
+    if (arg.Length == 0) { Console.WriteLine("usage: addaddr <hex address>"); return; }
+    var addr = (IntPtr)(long)ParseAddress(arg.Trim());
+    results.Add(addr);
+    Console.WriteLine($"added {addr.ToInt64():X16} - now {results.Count:N0} result(s)");
+}
+
+void CorrStart(string arg)
+{
+    var mem = Require();
+    if (results.Count == 0) { Console.WriteLine("no candidates - run 'scan' or 'snapshot'+'filter' first"); return; }
+    if (correlation is not null) { Console.WriteLine("already capturing - 'corrstop' first"); return; }
+
+    var bits = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+    var kind = bits.Length > 0 ? KindOf(bits[0]) : ValueKind.Int32;
+    int ms = bits.Length > 1 ? int.Parse(bits[1]) : 100;
+    int size = kind is ValueKind.Int64 or ValueKind.Double ? 8 : 4;
+
+    correlation = new CorrelationDetector(mem, results, size);
+    correlation.StartCapture(ms);
+    Program.LastKind = kind;
+    Console.WriteLine($"capturing {results.Count:N0} candidate(s) every {ms} ms - " +
+                      "run 'corrmark' at each event, then 'corrstop' when done");
+}
+
+void CorrMark()
+{
+    if (correlation is null) { Console.WriteLine("not capturing - run 'corrstart' first"); return; }
+    correlation.Mark();
+    Console.WriteLine($"marked ({correlation.MarkCount} so far)");
+}
+
+void CorrStop(string arg)
+{
+    if (correlation is null) { Console.WriteLine("not capturing - run 'corrstart' first"); return; }
+    int show = arg.Length > 0 ? int.Parse(arg) : 15;
+
+    var ranked = correlation.StopAndScore();
+    int totalMarks = ranked.Count > 0 ? ranked[0].TotalMarks : 0;
+    correlation = null;
+
+    Console.WriteLine($"{ranked.Count:N0} candidate(s) scored against {totalMarks} mark(s):");
+    foreach (var r in ranked.Take(show))
+        Console.WriteLine($"  {r.Address.ToInt64():X16}  hits {r.Hits}/{r.TotalMarks}  noise {r.NoiseChanges}");
+
+    results = ranked.Take(show).Select(r => r.Address).ToList();
 }
 
 ulong ParseAddress(string s)
