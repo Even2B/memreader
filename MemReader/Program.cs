@@ -57,6 +57,7 @@ try
                 case "next": Scan(rest, first: false); break;
                 case "list": ListResults(rest); break;
                 case "read": ReadAt(rest); break;
+                case "disasm": Disasm(rest); break;
                 case "write": WriteAt(rest); break;
                 case "writeall": WriteAll(rest); break;
                 case "journal": ShowJournal(rest); break;
@@ -96,6 +97,7 @@ void PrintHelp() => Console.WriteLine("""
   list [n]               show current result addresses (default 20)
   addaddr <hex>          add one known address to the results (e.g. from a hex dump)
   read <addr> [len]      hex dump at an address (hex ok: 0x7ff...), default 128 bytes
+  disasm <addr> [n]      disassemble n instructions at an address (default 10)
   write <addr> <value>   write one address, using the last scan's type
   writeall <value>       write every current result
   journal [n]            show recent writes (default 15) - address, before -> after
@@ -252,6 +254,22 @@ void ReadAt(string arg)
     Console.Write(Scanner.HexDump(data, addr));
     if (len >= 4) Console.WriteLine($"  as i32={BitConverter.ToInt32(data)}  f32={BitConverter.ToSingle(data)}");
     if (len >= 8) Console.WriteLine($"  as i64={BitConverter.ToInt64(data)}  f64={BitConverter.ToDouble(data)}");
+}
+
+void Disasm(string arg)
+{
+    var mem = Require();
+    var bits = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+    if (bits.Length == 0) { Console.WriteLine("usage: disasm <addr> [count]"); return; }
+
+    var addr = (IntPtr)(long)ParseAddress(bits[0]);
+    int count = bits.Length > 1 ? int.Parse(bits[1]) : 10;
+
+    var lines = Disassembler.Decode(mem, addr, count);
+    if (lines.Count == 0) { Console.WriteLine("could not read/decode at that address"); return; }
+
+    foreach (var l in lines)
+        Console.WriteLine($"  {l.Address:X16}  {l.Bytes,-24}  {l.Text}");
 }
 
 void WriteAt(string arg)

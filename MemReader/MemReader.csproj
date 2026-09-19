@@ -9,4 +9,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <ApplicationIcon>..\assets\icon.ico</ApplicationIcon>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Iced" Version="1.21.0" />
+  </ItemGroup>
 </Project>

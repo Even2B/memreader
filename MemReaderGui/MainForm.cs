@@ -96,6 +96,12 @@ internal sealed class MainForm : Form
     private readonly Button _undoSelected = new();
     private readonly Button _undoAll = new();
     private readonly Label _journalStatus = new();
+
+    // --- disassembly: what code actually touches an address, not just its bytes ---
+    private readonly TextBox _disasmAddr = new();
+    private readonly Button _disasmGo = new();
+    private readonly RichTextBox _disasmOutput = new();
+    private readonly Label _disasmStatus = new();
     private readonly System.Windows.Forms.Timer _monitor = new();
     private int _tickCost;
     private const int MaxLogEntries = 500;
@@ -641,6 +647,7 @@ internal sealed class MainForm : Form
         _tabs.TabPages.Add(BuildPointerTab());
         _tabs.TabPages.Add(BuildCorrelateTab());
         _tabs.TabPages.Add(BuildJournalTab());
+        _tabs.TabPages.Add(BuildDisassemblyTab());
         _rightSplit.Panel2.Controls.Add(_tabs);
 
         return _rightSplit;
@@ -845,6 +852,9 @@ internal sealed class MainForm : Form
         _grid.SelectionChanged += (_, _) => ShowDump();
 
         _consoleMode.Click += (_, _) => SwitchToConsole();
+        _disasmGo.Click += (_, _) => RunDisassembly();
+        _disasmAddr.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; RunDisassembly(); } };
+
         _journalGrid.CellValueNeeded += OnJournalValueNeeded;
         _undoSelected.Click += (_, _) => UndoSelectedWrite();
         _undoAll.Click += (_, _) => UndoAllWrites();
@@ -1201,6 +1211,64 @@ internal sealed class MainForm : Form
         return candidates.FirstOrDefault(File.Exists);
     }
 
+    private TabPage BuildDisassemblyTab()
+    {
+        var page = new TabPage("Disassembly") { BackColor = Theme.Field, Padding = new Padding(2) };
+
+        var pane = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = Theme.Field,
+        };
+        pane.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        pane.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        pane.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        var row = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill, AutoSize = true, BackColor = Theme.Field, WrapContents = false,
+        };
+
+        row.Controls.Add(new Label
+        {
+            Text = "Address", ForeColor = Theme.Muted, AutoSize = true, Margin = new Padding(0, 7, 6, 0),
+        });
+
+        _disasmAddr.Width = 160;
+        _disasmAddr.BackColor = Theme.Field;
+        _disasmAddr.ForeColor = Theme.Text;
+        _disasmAddr.BorderStyle = BorderStyle.FixedSingle;
+        _disasmAddr.Font = Theme.Mono;
+        _disasmAddr.PlaceholderText = "0x7ff6...";
+        _disasmAddr.Margin = new Padding(0, 2, 8, 0);
+        row.Controls.Add(_disasmAddr);
+
+        _disasmGo.Text = "Disassemble";
+        _disasmGo.Width = 100;
+        StyleButton(_disasmGo, primary: true);
+        row.Controls.Add(_disasmGo);
+
+        pane.Controls.Add(row, 0, 0);
+
+        _disasmOutput.Dock = DockStyle.Fill;
+        _disasmOutput.ReadOnly = true;
+        _disasmOutput.BackColor = Theme.Field;
+        _disasmOutput.ForeColor = Theme.Text;
+        _disasmOutput.BorderStyle = BorderStyle.FixedSingle;
+        _disasmOutput.Font = Theme.Mono;
+        _disasmOutput.WordWrap = false;
+        _disasmOutput.Text = "  Type a code address (from the hex dump, or a module base + offset) " +
+                             "and click Disassemble to see the actual instructions there.";
+        pane.Controls.Add(_disasmOutput, 0, 1);
+
+        _disasmStatus.ForeColor = Theme.Muted;
+        _disasmStatus.AutoSize = true;
+        _disasmStatus.Margin = new Padding(0, 6, 0, 0);
+        pane.Controls.Add(_disasmStatus, 0, 2);
+
+        page.Controls.Add(pane);
+        return page;
+    }
+
     private TabPage BuildJournalTab()
     {
         var page = new TabPage("Write journal") { BackColor = Theme.Field, Padding = new Padding(2) };
@@ -1270,6 +1338,50 @@ internal sealed class MainForm : Form
         pane.Controls.Add(buttons, 0, 2);
         page.Controls.Add(pane);
         return page;
+    }
+
+    // ------------------------------------------------------------- disassembly
+
+    private void RunDisassembly()
+    {
+        if (_target is null) { SetDisasmStatus("Attach to a process first.", Theme.Warn); return; }
+
+        string text = _disasmAddr.Text.Trim();
+        if (text.Length == 0) { SetDisasmStatus("Enter an address.", Theme.Warn); return; }
+
+        ulong addr;
+        try
+        {
+            text = text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? text[2..] : text;
+            addr = ulong.Parse(text, System.Globalization.NumberStyles.HexNumber);
+        }
+        catch (Exception)
+        {
+            SetDisasmStatus("That doesn't look like a hex address.", Theme.Warn);
+            return;
+        }
+
+        var lines = Disassembler.Decode(_target, (IntPtr)(long)addr, 40);
+        if (lines.Count == 0)
+        {
+            _disasmOutput.Text = "  Could not read or decode at that address - it may not be committed, " +
+                                 "or it may not be executable code.";
+            SetDisasmStatus("No instructions decoded.", Theme.Warn);
+            return;
+        }
+
+        var sb = new System.Text.StringBuilder();
+        foreach (var l in lines)
+            sb.AppendLine($"  {l.Address:X16}  {l.Bytes,-24}  {l.Text}");
+        _disasmOutput.Text = sb.ToString();
+
+        SetDisasmStatus($"{lines.Count} instruction(s) decoded.", Theme.Good);
+    }
+
+    private void SetDisasmStatus(string text, Color color)
+    {
+        _disasmStatus.Text = text;
+        _disasmStatus.ForeColor = color;
     }
 
     // -------------------------------------------------------------- write journal
