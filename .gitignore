@@ -9,3 +9,7 @@ crash.log
 
 # Pointer-chain exports are per-target and often per-machine; keep them local.
 *.chains
+
+# Staging area for `gh release create` - built exes belong in release assets,
+# never in git history.
+release/
