@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <AssemblyName>MemReaderGui</AssemblyName>
+    <RootNamespace>MemReader</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Share the scanner core with the console build rather than forking it. -->
+  <ItemGroup>
+    <Compile Include="..\MemReader\Native.cs" Link="Core\Native.cs" />
+    <Compile Include="..\MemReader\ProcessMemory.cs" Link="Core\ProcessMemory.cs" />
+    <Compile Include="..\MemReader\Scanner.cs" Link="Core\Scanner.cs" />
+    <Compile Include="..\MemReader\DeltaScanner.cs" Link="Core\DeltaScanner.cs" />
+    <Compile Include="..\MemReader\PointerScanner.cs" Link="Core\PointerScanner.cs" />
+  </ItemGroup>
+</Project>
