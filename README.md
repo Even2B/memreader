@@ -40,6 +40,9 @@ violation is *where* you point it, not the code.
 | **Watch list** | Live values, editable in place, per-row freeze |
 | **Change log** | Every write to a watched address, timestamped, with before → after |
 | **Pointer chains** | Find a route from a stable module base to a value; save it; reload it after the target restarts and it still resolves |
+| **Correlation detector** | Mark a moment (a global hotkey) across a few repetitions and rank candidates by how tightly they track your marks — finds a value with no visible number, fast, without a scan chain that a GC can break |
+| **Write journal** | Every deliberate write (a manual edit, "write to all results") logged with before/after; undo one entry or every write this session |
+| **Disassembler** | Real x86-64 instructions at any address (via Iced), not just raw hex — see the code that touches a value, not only the value itself |
 | **Multi-threaded scan** | Regions scanned in parallel — about 2× faster on multi-GB processes |
 | **Console mode** | Full CLI with the same core; scriptable, pipeable, used for this project's own tests |
 
@@ -95,13 +98,12 @@ other's folder rather than duplicating logic — one core, two front ends.
 
 Not yet built, in rough priority order:
 
-- **Event-correlation detector** — mark a moment (hotkey) across several
-  repetitions and rank addresses by how tightly their changes correlate with
-  your markers, instead of manual snapshot/filter cycles
+- **A real breakpoint** — catch the exact instruction that writes an address
+  (`DebugActiveProcess` + a hardware or software breakpoint) instead of
+  finding a value only by narrowing a scan
 - **Self-healing offsets** — fingerprint a found address by its surrounding
   byte pattern so a saved chain can re-find itself after a game patch shifts
   offsets, not just after a restart
-- **Write journal + undo** — every write logged with a one-click revert
 - **Value timeline graphs** — plot a watched address over time instead of
   reading a scrolling number
 
