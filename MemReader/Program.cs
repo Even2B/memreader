@@ -19,6 +19,7 @@ DeltaScan? deltaScan = null;
 PointerScanner? pointers = null;
 List<PointerChain> chains = new();
 CorrelationDetector? correlation = null;
+var journal = new WriteJournal();
 
 // A PID on the command line attaches straight away, so handing over from the GUI
 // continues the same session instead of starting from nothing. This has to sit after
@@ -58,6 +59,9 @@ try
                 case "read": ReadAt(rest); break;
                 case "write": WriteAt(rest); break;
                 case "writeall": WriteAll(rest); break;
+                case "journal": ShowJournal(rest); break;
+                case "undo": Undo(rest); break;
+                case "undoall": UndoAll(); break;
                 case "snapshot": Snapshot(rest); break;
                 case "filter": FilterDelta(rest); break;
                 case "ptrindex": BuildPointerIndex(); break;
@@ -94,6 +98,9 @@ void PrintHelp() => Console.WriteLine("""
   read <addr> [len]      hex dump at an address (hex ok: 0x7ff...), default 128 bytes
   write <addr> <value>   write one address, using the last scan's type
   writeall <value>       write every current result
+  journal [n]            show recent writes (default 15) - address, before -> after
+  undo <n>                revert entry n from 'journal' (1 = most recent)
+  undoall                 revert every write this session, oldest state per address
 
   pointer chains (survive a restart)
   ptrindex               index every pointer in the process (do this once)
@@ -256,7 +263,7 @@ void WriteAt(string arg)
 
     var addr = (IntPtr)(long)ParseAddress(bits[0]);
     var needle = Needle.Parse(Program.LastKind, bits[1].Trim());
-    Console.WriteLine(mem.Write(addr, needle.Pattern)
+    Console.WriteLine(journal.RecordedWrite(mem, addr, needle.Pattern, "write")
         ? $"wrote {needle.Display} to {addr.ToInt64():X}"
         : $"write to {addr.ToInt64():X} was refused");
 }
@@ -269,7 +276,7 @@ void WriteAll(string arg)
     if (!mem.CanWrite) { Console.WriteLine("process opened read-only - rerun as Administrator"); return; }
 
     var needle = Needle.Parse(Program.LastKind, arg);
-    int ok = results.Count(a => mem.Write(a, needle.Pattern));
+    int ok = results.Count(a => journal.RecordedWrite(mem, a, needle.Pattern, "writeall"));
     Console.WriteLine($"wrote {needle.Display} to {ok:N0} of {results.Count:N0} address(es)");
 }
 
@@ -434,6 +441,42 @@ void CorrStop(string arg)
         Console.WriteLine($"  {r.Address.ToInt64():X16}  hits {r.Hits}/{r.TotalMarks}  noise {r.NoiseChanges}");
 
     results = ranked.Take(show).Select(r => r.Address).ToList();
+}
+
+void ShowJournal(string arg)
+{
+    int n = arg.Length > 0 ? int.Parse(arg) : 15;
+    var recent = journal.Entries.Reverse().Take(n).ToList();
+    if (recent.Count == 0) { Console.WriteLine("no writes recorded this session"); return; }
+
+    for (int i = 0; i < recent.Count; i++)
+    {
+        var e = recent[i];
+        Console.WriteLine($"  {i + 1,3}. {e.When:HH:mm:ss}  {e.Address.ToInt64():X16}  " +
+                          $"{BitConverter.ToString(e.Before)} -> {BitConverter.ToString(e.After)}  [{e.Source}]");
+    }
+}
+
+void Undo(string arg)
+{
+    var mem = Require();
+    if (!int.TryParse(arg, out int n) || n < 1) { Console.WriteLine("usage: undo <n>  (n from 'journal', 1 = most recent)"); return; }
+
+    var recent = journal.Entries.Reverse().ToList();
+    if (n > recent.Count) { Console.WriteLine($"only {recent.Count} entries recorded"); return; }
+
+    var entry = recent[n - 1];
+    Console.WriteLine(journal.Undo(mem, entry)
+        ? $"reverted {entry.Address.ToInt64():X16} to {BitConverter.ToString(entry.Before)}"
+        : $"undo failed for {entry.Address.ToInt64():X16}");
+}
+
+void UndoAll()
+{
+    var mem = Require();
+    int count = journal.Entries.Select(e => e.Address).Distinct().Count();
+    int ok = journal.UndoAll(mem);
+    Console.WriteLine($"reverted {ok} of {count} address(es) to their pre-session state");
 }
 
 ulong ParseAddress(string s)

@@ -20,5 +20,6 @@
     <Compile Include="..\MemReader\DeltaScanner.cs" Link="Core\DeltaScanner.cs" />
     <Compile Include="..\MemReader\PointerScanner.cs" Link="Core\PointerScanner.cs" />
     <Compile Include="..\MemReader\CorrelationDetector.cs" Link="Core\CorrelationDetector.cs" />
+    <Compile Include="..\MemReader\WriteJournal.cs" Link="Core\WriteJournal.cs" />
   </ItemGroup>
 </Project>

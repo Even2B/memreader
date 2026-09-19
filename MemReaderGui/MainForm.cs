@@ -89,6 +89,13 @@ internal sealed class MainForm : Form
     private CorrelationDetector? _correlation;
     private List<CorrelationResult> _corrResults = new();
     private bool _hotkeyRegistered;
+
+    // --- write journal: a safety net for deliberate edits and batch writes ---
+    private readonly WriteJournal _journal = new();
+    private readonly DataGridView _journalGrid = new();
+    private readonly Button _undoSelected = new();
+    private readonly Button _undoAll = new();
+    private readonly Label _journalStatus = new();
     private readonly System.Windows.Forms.Timer _monitor = new();
     private int _tickCost;
     private const int MaxLogEntries = 500;
@@ -633,6 +640,7 @@ internal sealed class MainForm : Form
         _tabs.TabPages.Add(logTab);
         _tabs.TabPages.Add(BuildPointerTab());
         _tabs.TabPages.Add(BuildCorrelateTab());
+        _tabs.TabPages.Add(BuildJournalTab());
         _rightSplit.Panel2.Controls.Add(_tabs);
 
         return _rightSplit;
@@ -837,6 +845,10 @@ internal sealed class MainForm : Form
         _grid.SelectionChanged += (_, _) => ShowDump();
 
         _consoleMode.Click += (_, _) => SwitchToConsole();
+        _journalGrid.CellValueNeeded += OnJournalValueNeeded;
+        _undoSelected.Click += (_, _) => UndoSelectedWrite();
+        _undoAll.Click += (_, _) => UndoAllWrites();
+
         _corrStart.Click += (_, _) => StartCorrelation();
         _corrMark.Click += (_, _) => MarkCorrelationEvent();
         _corrStop.Click += (_, _) => StopCorrelation();
@@ -999,6 +1011,8 @@ internal sealed class MainForm : Form
             _corrResults = new List<CorrelationResult>();
             _corrGrid.RowCount = 0;
             _corrAddToWatch.Enabled = false;
+            _journal.Clear();
+            _journalGrid.RowCount = 0;
 
             _attached.Text = $"Attached to {_target.Process.ProcessName}  (PID {_target.Process.Id}, " +
                              $"{(_target.Is32Bit ? "32-bit" : "64-bit")})  -  " +
@@ -1185,6 +1199,131 @@ internal sealed class MainForm : Form
         };
 
         return candidates.FirstOrDefault(File.Exists);
+    }
+
+    private TabPage BuildJournalTab()
+    {
+        var page = new TabPage("Write journal") { BackColor = Theme.Field, Padding = new Padding(2) };
+
+        var pane = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = Theme.Field,
+        };
+        pane.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        pane.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        pane.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        pane.Controls.Add(new Label
+        {
+            Text = "Every manual edit and \"write to all results\" lands here. Freeze corrects " +
+                   "itself many times a second and isn't logged - untick it to stop that instead.",
+            ForeColor = Theme.Muted, AutoSize = false, Dock = DockStyle.Fill, Height = 34,
+        }, 0, 0);
+
+        _journalGrid.Dock = DockStyle.Fill;
+        _journalGrid.VirtualMode = true;
+        _journalGrid.ReadOnly = true;
+        _journalGrid.AllowUserToAddRows = false;
+        _journalGrid.RowHeadersVisible = false;
+        _journalGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        _journalGrid.MultiSelect = false;
+        _journalGrid.BackgroundColor = Theme.Field;
+        _journalGrid.BorderStyle = BorderStyle.FixedSingle;
+        _journalGrid.GridColor = Theme.Border;
+        _journalGrid.EnableHeadersVisualStyles = false;
+        _journalGrid.ColumnHeadersDefaultCellStyle.BackColor = Theme.Panel;
+        _journalGrid.ColumnHeadersDefaultCellStyle.ForeColor = Theme.Muted;
+        _journalGrid.DefaultCellStyle.BackColor = Theme.Field;
+        _journalGrid.DefaultCellStyle.ForeColor = Theme.Text;
+        _journalGrid.DefaultCellStyle.SelectionBackColor = Theme.Accent;
+        _journalGrid.DefaultCellStyle.SelectionForeColor = Color.Black;
+        _journalGrid.DefaultCellStyle.Font = Theme.Mono;
+        _journalGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "When", Width = 80 });
+        _journalGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Address", Width = 150 });
+        _journalGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Before", Width = 110 });
+        _journalGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "After", Width = 110 });
+        _journalGrid.Columns.Add(new DataGridViewTextBoxColumn
+        { HeaderText = "Source", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
+        pane.Controls.Add(_journalGrid, 0, 1);
+
+        var buttons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill, AutoSize = true, BackColor = Theme.Field,
+            Margin = new Padding(0, 6, 0, 0), WrapContents = false,
+        };
+
+        _undoSelected.Text = "Undo selected";
+        _undoSelected.Width = 110;
+        StyleButton(_undoSelected, primary: true);
+        buttons.Controls.Add(_undoSelected);
+
+        _undoAll.Text = "Undo all";
+        _undoAll.Width = 90;
+        StyleButton(_undoAll, primary: false);
+        buttons.Controls.Add(_undoAll);
+
+        _journalStatus.ForeColor = Theme.Muted;
+        _journalStatus.AutoSize = true;
+        _journalStatus.Margin = new Padding(12, 7, 0, 0);
+        buttons.Controls.Add(_journalStatus);
+
+        pane.Controls.Add(buttons, 0, 2);
+        page.Controls.Add(pane);
+        return page;
+    }
+
+    // -------------------------------------------------------------- write journal
+
+    private void OnJournalValueNeeded(object? sender, DataGridViewCellValueEventArgs e)
+    {
+        // Newest first - the write you probably want to undo is the one you just made.
+        int i = _journal.Entries.Count - 1 - e.RowIndex;
+        if (i < 0 || i >= _journal.Entries.Count) return;
+        var entry = _journal.Entries[i];
+
+        e.Value = e.ColumnIndex switch
+        {
+            0 => entry.When.ToString("HH:mm:ss"),
+            1 => $"{entry.Address.ToInt64():X16}",
+            2 => BitConverter.ToString(entry.Before).Replace('-', ' '),
+            3 => BitConverter.ToString(entry.After).Replace('-', ' '),
+            _ => entry.Source,
+        };
+    }
+
+    private void UndoSelectedWrite()
+    {
+        if (_target is null) { SetJournalStatus("Attach to a process first.", Theme.Warn); return; }
+        if (_journalGrid.CurrentRow is not { Index: >= 0 } row) { SetJournalStatus("Select a row first.", Theme.Warn); return; }
+
+        int i = _journal.Entries.Count - 1 - row.Index;
+        if (i < 0 || i >= _journal.Entries.Count) return;
+        var entry = _journal.Entries[i];
+
+        SetJournalStatus(_journal.Undo(_target, entry)
+            ? $"Reverted {entry.Address.ToInt64():X} to {BitConverter.ToString(entry.Before).Replace('-', ' ')}."
+            : $"Undo failed for {entry.Address.ToInt64():X} - is the process still writable?",
+            Theme.Good);
+    }
+
+    private void UndoAllWrites()
+    {
+        if (_target is null) { SetJournalStatus("Attach to a process first.", Theme.Warn); return; }
+        if (_journal.Entries.Count == 0) { SetJournalStatus("Nothing to undo.", Theme.Muted); return; }
+
+        int touched = _journal.Entries.Select(e => e.Address).Distinct().Count();
+        int ok = _journal.UndoAll(_target);
+        _journalGrid.RowCount = 0;
+        _journalGrid.Invalidate();
+
+        SetJournalStatus($"Reverted {ok} of {touched} address(es) to their pre-session state.",
+            ok == touched ? Theme.Good : Theme.Warn);
+    }
+
+    private void SetJournalStatus(string text, Color color)
+    {
+        _journalStatus.Text = text;
+        _journalStatus.ForeColor = color;
     }
 
     // ---------------------------------------------------------------- correlation
@@ -1658,7 +1797,9 @@ internal sealed class MainForm : Form
                 "Write to every result", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK)
             return;
 
-        int ok = _results.Count(addr => _target.Write(addr, bytes));
+        int ok = _results.Count(addr => _journal.RecordedWrite(_target, addr, bytes, "write all"));
+        _journalGrid.RowCount = _journal.Entries.Count;
+        _journalGrid.Invalidate();
         _grid.Invalidate();
         SetStatus($"Wrote {_value.Text.Trim()} to {ok:N0} of {_results.Count:N0} address(es).",
             ok > 0 ? Theme.Good : Theme.Warn);
@@ -1710,9 +1851,11 @@ internal sealed class MainForm : Form
         try
         {
             var bytes = w.ParseToBytes(Convert.ToString(e.Value) ?? "");
-            if (_target.Write(w.Address, bytes))
+            if (_journal.RecordedWrite(_target, w.Address, bytes, "edit"))
             {
                 w.Locked = bytes; // a frozen row now holds the value just typed
+                _journalGrid.RowCount = _journal.Entries.Count;
+                _journalGrid.Invalidate();
                 SetStatus($"Wrote {e.Value} to {w.Address.ToInt64():X}.", Theme.Good);
             }
             else
